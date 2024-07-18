@@ -1,74 +1,77 @@
-from openai import OpenAI
-import requests
+import base64
+import json
+from flask import Flask, render_template, request
+from worker import speech_to_text, text_to_speech, openai_process_message
+from flask_cors import CORS
+import os
 
-openai_client = OpenAI()
-
-
-def speech_to_text(audio_binary):
-
-    # Set up Watson Speech-to-Text HTTP Api url
-    base_url = "https://sn-watson-stt.labs.skills.network"
-    api_url = base_url+'/speech-to-text/api/v1/recognize'
-
-    # Set up parameters for our HTTP reqeust
-    params = {
-        'model': 'en-US_Multimedia',
-    }
-
-    # Set up the body of our HTTP request
-    body = audio_binary
-
-    # Send a HTTP Post request
-    response = requests.post(api_url, params=params, data=audio_binary).json()
-
-    # Parse the response to get our transcribed text
-    text = 'null'
-    while bool(response.get('results')):
-        print('speech to text response:', response)
-        text = response.get('results').pop().get('alternatives').pop().get('transcript')
-        print('recognised text: ', text)
-        return text
+app = Flask(__name__)
+cors = CORS(app, resources={r"/*": {"origins": "*"}})
 
 
-def text_to_speech(text, voice=""):
-    # Set up Watson Text-to-Speech HTTP Api url
-    base_url = "https://sn-watson-tts.labs.skills.network"
-    api_url = base_url + '/text-to-speech/api/v1/synthesize?output=output_text.wav'
-
-    # Adding voice parameter in api_url if the user has selected a preferred voice
-    if voice != "" and voice != "default":
-        api_url += "&voice=" + voice
-
-    # Set the headers for our HTTP request
-    headers = {
-        'Accept': 'audio/wav',
-        'Content-Type': 'application/json',
-    }
-
-    # Set the body of our HTTP request
-    json_data = {
-        'text': text,
-    }
-
-    # Send a HTTP Post request to Watson Text-to-Speech Service
-    response = requests.post(api_url, headers=headers, json=json_data)
-    print('text to speech response:', response)
-    return response.content
+@app.route('/', methods=['GET'])
+def index():
+    return render_template('index.html')
 
 
-def openai_process_message(user_message):
-    # Set the prompt for OpenAI Api
-    prompt = "Act like a personal assistant. You can respond to questions, translate sentences, summarize news, and give recommendations."
-    # Call the OpenAI Api to process our prompt
-    openai_response = openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_message}
-        ],
-        max_tokens=4000
+@app.route('/speech-to-text', methods=['POST'])
+def speech_to_text_route():
+    print("processing speech-to-text")
+    audio_binary = request.data # Get the user's speech from their request
+    text = speech_to_text(audio_binary) # Call speech_to_text function to transcribe the speech
+
+    # Return the response back to the user in JSON format
+    response = app.response_class(
+        response=json.dumps({'text': text}),
+        status=200,
+        mimetype='application/json'
     )
-    print("openai response:", openai_response)
-    # Parse the response to get the response message for our prompt
-    response_text = openai_response.choices[0].message.content
-    return response_text
+    print(response)
+    print(response.data)
+    return response
+
+
+@app.route('/process-message', methods=['POST'])
+def process_message_route():
+    user_message = request.json['userMessage'] # Get user's message from their request
+    print('user_message', user_message)
+
+    voice = request.json['voice'] # Get user's preferred voice from their request
+    print('voice', voice)
+
+    # Call openai_process_message function to process the user's message and get a response back
+    openai_response_text = openai_process_message(user_message)
+
+    # Clean the response to remove any emptylines
+    openai_response_text = os.linesep.join([s for s in openai_response_text.splitlines() if s])
+
+    # Call our text_to_speech function to convert OpenAI Api's reponse to speech
+    openai_response_speech = text_to_speech(openai_response_text, voice)
+
+    # convert openai_response_speech to base64 string so it can be sent back in the JSON response
+    openai_response_speech = base64.b64encode(openai_response_speech).decode('utf-8')
+
+    # Send a JSON response back to the user containing their message's response both in text and speech formats
+    response = app.response_class(
+        response=json.dumps({"openaiResponseText": openai_response_text, "openaiResponseSpeech": openai_response_speech}),
+        status=200,
+        mimetype='application/json'
+    )
+
+    print(response)
+    return response
+
+
+@app.route('/process-message', methods=['POST'])
+def process_prompt_route():
+    response = app.response_class(
+        response=json.dumps({"openaiResponseText": None, "openaiResponseSpeech": None}),
+        status=200,
+        mimetype='application/json'
+    )
+    return response
+
+
+if __name__ == "__main__":
+    app.run(port=8000, host='0.0.0.0')
+
